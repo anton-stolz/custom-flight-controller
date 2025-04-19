@@ -24,11 +24,10 @@
 #include "usb_device.h"
 #include "gpio.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "mpu6500.h"
-
+#include "MahonyAHRS.h"
 #include "dshot.h"
 /* USER CODE END Includes */
 
@@ -50,8 +49,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-uint16_t my_motor_value_off[4] = {0, 0, 0, 0};
-uint16_t my_motor_value_on[4] = {200, 200, 200, 200};
+
+const uint16_t max_motor_value = 1000;
+uint16_t motor_value[4] = {0,0,0,0};
+const uint16_t motor_offset = 48;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -83,8 +84,40 @@ HAL_StatusTypeDef ReadRegister(uint8_t addr, uint8_t *byte)
     }
     return hal_status;
 }
-
 */
+
+int32_t frequency, duty_cycle;
+uint32_t capture_value;
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim){
+  if(htim ->Channel == HAL_TIM_ACTIVE_CHANNEL_1){
+    capture_value = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+    if(capture_value){
+      frequency = SystemCoreClock / (capture_value);
+      duty_cycle = 10000 * HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) / capture_value - 750;
+    }
+  }
+}
+
+
+int map_and_clamp(int input)
+{
+    // Define input and output range
+    const int input_min = 22000;
+    const int input_max = 41000;
+    const int output_min = 0;
+    const int output_max = 10000;
+
+    // Clamp input first
+    if (input < input_min) input = input_min;
+    if (input > input_max) input = input_max;
+
+    // Linear mapping
+    int output = (input - input_min) * (output_max - output_min) / (input_max - input_min) + output_min;
+
+    return output;
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -135,40 +168,78 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+  HAL_Delay(1500);
+
+  twoKp = 2.0f * 0.5f;  // Adjust these values based on your application
+  twoKi = 2.0f * 0.0f;
+  q0 = 1.0f; q1 = q2 = q3 = 0.0f;  // Initial quaternion (no rotation)
+
   dshot_init(DSHOT600);
 
-  uint16_t start_cmd[4] = {0, 0, 0, 0};
-  uint16_t idle_cmd[4] = {48, 48, 48, 48};
-  uint16_t run_cmd[4] = {100, 100, 100, 100};
-  uint16_t beep_cmd[4] = {1, 2, 3, 4};
+
+	int rx_roll = 0;
+	int rx_pitch = 0;
+	int rx_yaw = 0;
+	int rx_throttle = 0;
+
+	HAL_TIM_IC_Start(&htim1, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start(&htim1, TIM_CHANNEL_2);
 
 
+	HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_2);
 
-  while (1)
-  {
-	  char msg[20];
-	  int len = sprintf(msg, "starting\n");
-	  CDC_Transmit_FS((uint8_t*)msg, len);
 
-	  Mpu6500_Init(&mpu6500, &hi2c1);
-	 // char msg[20];
-	  if (Mpu6500_ConfigSrd(&mpu6500, 19)) {
-	       // Initialization successful - proceed
+	HAL_TIM_IC_Start(&htim4, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start(&htim4, TIM_CHANNEL_2);
 
-		  int len = sprintf(msg, "Did work\n");
+
+	HAL_TIM_IC_Start(&htim9, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start(&htim9, TIM_CHANNEL_2);
+
+
+	Mpu6500_Init(&mpu6500, &hi2c1);
+    char msg[20];
+	if (Mpu6500_ConfigSrd(&mpu6500, 1)) {
+		 // Initialization successful - proceed
+
+		  int len = sprintf(msg, "imu init worked\n");
 		  CDC_Transmit_FS((uint8_t*)msg, len);
-	  }
-	  else {
-	       // Initialization failed - handle error
+	}
+	else {
+		 // Initialization failed - handle error
 
-			  int len = sprintf(msg, "Did not work\n");
+			  int len = sprintf(msg, "imu init Did not work\n");
 			  CDC_Transmit_FS((uint8_t*)msg, len);
 			  // Or your preferred error handling
-	   }
+	 }
+	HAL_Delay(1000);
 	  char msg2[100]; // Buffer for string formatting - make sure it's large enough
-	  int len2;
 
-	  if (Mpu6500_Read(&mpu6500)) {
+  while (1){
+	  int len2;
+	  bool succ = false;
+	  while(!succ){
+		  succ = Mpu6500_Read(&mpu6500);
+		  if (succ) {
+			  MahonyAHRSupdateIMU(mpu6500.gyro[0],
+				  mpu6500.gyro[1],
+				  mpu6500.gyro[2],
+				  mpu6500.accel[0],
+				  mpu6500.accel[1],
+				  mpu6500.accel[2]);
+
+		    // Compute Euler angles (roll, pitch, yaw) in radians
+		    float roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1*q1 + q2*q2));
+		    float pitch = asinf(2.0f * (q0 * q2 - q3 * q1));
+		    float yaw = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2*q2 + q3*q3));
+
+		    // Convert to degrees
+		    roll *= (180.0f / M_PI);
+		    pitch *= (180.0f / M_PI);
+		    yaw *= (180.0f / M_PI);
+
 	      len2 = sprintf(msg2, "did work! %d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
 	    		  mpu6500.new_imu_data,
 				  mpu6500.accel[0],
@@ -178,35 +249,35 @@ int main(void)
 				  mpu6500.gyro[1],
 				  mpu6500.gyro[2],
 				  mpu6500.temp);
+	      len2 = sprintf(msg2,"%4f\t%4f\t%4f\t\n",roll,pitch, yaw);
+
 	      CDC_Transmit_FS((uint8_t*)msg2, len2);
+  	      CDC_Transmit_FS("r\n", 2);
+
+		  }
+		  else{
+					 CDC_Transmit_FS("n\n", 2);
+		  }
 	  }
-	  else{
-		  len2 = sprintf(msg2, "did not work :(\n");
-		  	      CDC_Transmit_FS((uint8_t*)msg2, len2);
-	  }
 
-      //HAL_Delay(500);
+	    rx_roll = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2));
+	    rx_pitch = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_1));
+	    rx_throttle = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim4, TIM_CHANNEL_2));
+	    rx_yaw = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim9, TIM_CHANNEL_2));
 
-	  /*
-	  ReadRegister(63,&byte);
+	    char msg[100];
+	    int len = sprintf(msg, "Roll: %5d Pitch: %5d Yaw: %5d Throttle: %5d\n",
+	                      rx_roll, rx_pitch, rx_yaw, rx_throttle);
+	  //CDC_Transmit_FS((uint8_t*)msg, len);
 
-	  char msg[20];
-	  int len = sprintf(msg, "Hello from STM32!!: %d\r\n", byte);
-	  CDC_Transmit_FS((uint8_t*)msg, len);
-      HAL_Delay(1000);
-*/
+	    motor_value[0] = rx_throttle *max_motor_value/10000+ motor_offset;
+	    motor_value[1] = rx_throttle *max_motor_value/10000+motor_offset;
+	    motor_value[2] = rx_throttle *max_motor_value/10000+motor_offset;
+	    motor_value[3] = rx_throttle *max_motor_value/10000+motor_offset;
 
-/*
+	    dshot_write(motor_value);
 
-	  char msg[20];
-	  uint8_t who_am_i = 0;
-	  HAL_I2C_Mem_Read(&hi2c1,0x68<<1,0x75,I2C_MEMADD_SIZE_8BIT,&who_am_i,1,100);
-c
-*/
-
-	  //HAL_GPIO_TogglePin(GPIOB,GPIO_PIN_9);
-
-	  /*** writing to dshot motor working!!
+	   /*** writing to dshot motor working!!
 	   *   for (int i = 0; i < 250; i++)  // 500ms / 2ms = 250 iterations
   {
       dshot_write(start_cmd);
