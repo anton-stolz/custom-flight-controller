@@ -29,6 +29,11 @@
 #include "mpu6500.h"
 #include "MahonyAHRS.h"
 #include "dshot.h"
+
+#define MAP_AND_CLAMP(input, imin, imax, omin, omax) \
+    ( ((input) < (imin) ? (imin) : ( (input) > (imax) ? (imax) : (input) )) - (imin) ) * ((omax) - (omin)) / ((imax) - (imin)) + (omin)
+
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,9 +55,38 @@
 
 /* USER CODE BEGIN PV */
 
-const uint16_t max_motor_value = 1000;
+const uint16_t max_motor_value = 100; //+ x* max pid for actual
+const uint16_t max_pid = 100;
+// angles
+const float pid_area_pitch = 20.0f;
+const float pid_area_roll = 20.0f;
+const float pid_area_yaw = 50.0f;
+
 uint16_t motor_value[4] = {0,0,0,0};
 const uint16_t motor_offset = 48;
+
+const int input_min = 22000;
+const int input_max = 41000;
+const int output_min = 0;
+const int output_max = 10000;
+const int update_freq = 500;
+const float delta_t = 1.0f/update_freq;
+//in deg
+const float max_delta_yaw = 360.0f*.5f * delta_t;
+const float max_rx_angle = 20.0f;
+
+float roll;
+float pitch;
+float yaw;
+
+int roll_cor;
+int pitch_cor;
+int yaw_cor;
+unsigned long rx_inactive = 0;
+
+float target_yaw = 0.0f;
+int throttle;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,33 +123,17 @@ HAL_StatusTypeDef ReadRegister(uint8_t addr, uint8_t *byte)
 int32_t frequency, duty_cycle;
 uint32_t capture_value;
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim){
-  if(htim ->Channel == HAL_TIM_ACTIVE_CHANNEL_1){
+	rx_inactive = 0;
+  /*if(htim ->Channel == HAL_TIM_ACTIVE_CHANNEL_1){
     capture_value = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
     if(capture_value){
       frequency = SystemCoreClock / (capture_value);
       duty_cycle = 10000 * HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_2) / capture_value - 750;
     }
-  }
+  }*/
 }
 
 
-int map_and_clamp(int input)
-{
-    // Define input and output range
-    const int input_min = 22000;
-    const int input_max = 41000;
-    const int output_min = 0;
-    const int output_max = 10000;
-
-    // Clamp input first
-    if (input < input_min) input = input_min;
-    if (input > input_max) input = input_max;
-
-    // Linear mapping
-    int output = (input - input_min) * (output_max - output_min) / (input_max - input_min) + output_min;
-
-    return output;
-}
 
 
 /* USER CODE END 0 */
@@ -178,69 +196,70 @@ int main(void)
   dshot_init(DSHOT600);
 
 
-	int rx_roll = 0;
-	int rx_pitch = 0;
-	int rx_yaw = 0;
 	int rx_throttle = 0;
 
 	HAL_TIM_IC_Start(&htim1, TIM_CHANNEL_1);
 	HAL_TIM_IC_Start(&htim1, TIM_CHANNEL_2);
 
 
-	HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1);
 	HAL_TIM_IC_Start(&htim3, TIM_CHANNEL_2);
 
 
-	HAL_TIM_IC_Start(&htim4, TIM_CHANNEL_1);
+	HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
 	HAL_TIM_IC_Start(&htim4, TIM_CHANNEL_2);
 
 
 	HAL_TIM_IC_Start(&htim9, TIM_CHANNEL_1);
 	HAL_TIM_IC_Start(&htim9, TIM_CHANNEL_2);
 
-
+	int wait;
+    char msg[1000];
+    int len;
 	Mpu6500_Init(&mpu6500, &hi2c1);
-    char msg[20];
+
 	if (Mpu6500_ConfigSrd(&mpu6500, 1)) {
 		 // Initialization successful - proceed
 
-		  int len = sprintf(msg, "imu init worked\n");
+		  len = sprintf(msg, "imu init worked\n");
 		  CDC_Transmit_FS((uint8_t*)msg, len);
 	}
 	else {
 		 // Initialization failed - handle error
 
-			  int len = sprintf(msg, "imu init Did not work\n");
+			  len = sprintf(msg, "imu init Did not work\n");
 			  CDC_Transmit_FS((uint8_t*)msg, len);
 			  // Or your preferred error handling
 	 }
 	HAL_Delay(1000);
-	  char msg2[100]; // Buffer for string formatting - make sure it's large enough
 
   while (1){
-	  int len2;
+	  ++rx_inactive;
+	  wait = 0;
+	  len = sprintf(msg,"\n######\n");
 	  bool succ = false;
 	  while(!succ){
 		  succ = Mpu6500_Read(&mpu6500);
 		  if (succ) {
-			  MahonyAHRSupdateIMU(mpu6500.gyro[0],
-				  mpu6500.gyro[1],
-				  mpu6500.gyro[2],
-				  mpu6500.accel[0],
-				  mpu6500.accel[1],
-				  mpu6500.accel[2]);
+			  MahonyAHRSupdateIMU(
+				mpu6500.gyro[2],
+				mpu6500.gyro[0],
+				mpu6500.gyro[1],
+				mpu6500.accel[2],
+				mpu6500.accel[0],
+				mpu6500.accel[1]);
 
 		    // Compute Euler angles (roll, pitch, yaw) in radians
-		    float roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1*q1 + q2*q2));
-		    float pitch = asinf(2.0f * (q0 * q2 - q3 * q1));
-		    float yaw = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2*q2 + q3*q3));
+		    roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1*q1 + q2*q2));
+		    pitch = asinf(2.0f * (q0 * q2 - q3 * q1));
+		    yaw = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2*q2 + q3*q3));
 
 		    // Convert to degrees
 		    roll *= (180.0f / M_PI);
 		    pitch *= (180.0f / M_PI);
 		    yaw *= (180.0f / M_PI);
 
-	      len2 = sprintf(msg2, "did work! %d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
+	     /* len = sprintf(msg2, "did work! %d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n",
 	    		  mpu6500.new_imu_data,
 				  mpu6500.accel[0],
 				  mpu6500.accel[1],
@@ -248,55 +267,61 @@ int main(void)
 				  mpu6500.gyro[0],
 				  mpu6500.gyro[1],
 				  mpu6500.gyro[2],
-				  mpu6500.temp);
-	      len2 = sprintf(msg2,"%4f\t%4f\t%4f\t\n",roll,pitch, yaw);
+				  mpu6500.temp);*/
 
-	      CDC_Transmit_FS((uint8_t*)msg2, len2);
-  	      CDC_Transmit_FS("r\n", 2);
+		  len = sprintf(msg+len,"waited: %3d inactive_since: %4d angles %3.2f\t%3.2f\t%3.2f\t\n quat: %3.2f\t%3.2f\t%3.2f\t%3.2f\n",wait,rx_inactive,roll,pitch, yaw,q0,q1,q2,q3);
+
+
 
 		  }
 		  else{
-					 CDC_Transmit_FS("n\n", 2);
+					 wait++;// CDC_Transmit_FS("n\n", 2);
 		  }
 	  }
 
-	    rx_roll = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2));
-	    rx_pitch = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_1));
-	    rx_throttle = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim4, TIM_CHANNEL_2));
-	    rx_yaw = map_and_clamp(HAL_TIM_ReadCapturedValue(&htim9, TIM_CHANNEL_2));
+	    roll += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2),input_min,input_max,-max_rx_angle,max_rx_angle);
+	    pitch += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_1),input_min,input_max,-max_rx_angle,max_rx_angle);
+	    target_yaw += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim9, TIM_CHANNEL_2),input_min,input_max,-max_delta_yaw,max_delta_yaw);
+	    yaw += target_yaw;
 
-	    char msg[100];
-	    int len = sprintf(msg, "Roll: %5d Pitch: %5d Yaw: %5d Throttle: %5d\n",
+	    if (yaw < 0){yaw += ((int)(-yaw) + 180)/360*360;}
+	    else{yaw -= ((int)(yaw) + 180)/360*360;}
+
+	    throttle = MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim4, TIM_CHANNEL_2),input_min,input_max,0,max_motor_value);
+
+	    roll_cor = (int)(MAP_AND_CLAMP(roll,-pid_area_roll,pid_area_roll,-max_pid,max_pid));
+	    pitch_cor = (int)(MAP_AND_CLAMP(pitch,-pid_area_pitch,pid_area_pitch,-max_pid,max_pid));
+	    yaw_cor = (int)(MAP_AND_CLAMP(pitch,-pid_area_yaw,pid_area_yaw,-max_pid,max_pid));
+
+
+		len += sprintf(msg+len,"roll: %3.2f\t pitch:%3.2f\t yaw:%3.2f\ttarget_yaw:%3.2f throttle: %d\n",roll,pitch, yaw,target_yaw,throttle);
+
+
+	   /* int len = sprintf(msg, "Roll: %5d Pitch: %5d Yaw: %5d Throttle: %5d\n",
 	                      rx_roll, rx_pitch, rx_yaw, rx_throttle);
-	  //CDC_Transmit_FS((uint8_t*)msg, len);
+	    CDC_Transmit_FS((uint8_t*)msg, len);*/
 
-	    motor_value[0] = rx_throttle *max_motor_value/10000+ motor_offset;
-	    motor_value[1] = rx_throttle *max_motor_value/10000+motor_offset;
-	    motor_value[2] = rx_throttle *max_motor_value/10000+motor_offset;
-	    motor_value[3] = rx_throttle *max_motor_value/10000+motor_offset;
+	    motor_value[0] = throttle + roll_cor;// + yaw_cor;
+	    motor_value[1] = throttle + pitch_cor;// - yaw_cor;
+	    motor_value[2] = throttle - roll_cor;// + yaw_cor;
+	    motor_value[3] = throttle - pitch_cor;// - yaw_cor;
+
+	    if(motor_value[0]>50000){motor_value[0] = 0;}
+	    if(motor_value[1]>50000){motor_value[1] = 0;}
+	    if(motor_value[2]>50000){motor_value[2] = 0;}
+	    if(motor_value[3]>50000){motor_value[3] = 0;}
+
+	    if(rx_inactive>200 || throttle == 0){
+	    	motor_value[0] = motor_value[1] = motor_value[2] = motor_value[3] = 0;
+	    }
+
+		len += sprintf(msg+len,"motors: %d\t%d\t%d\t%d\n",motor_value[0],motor_value[1],motor_value[2],motor_value[3]);
+
 
 	    dshot_write(motor_value);
 
-	   /*** writing to dshot motor working!!
-	   *   for (int i = 0; i < 250; i++)  // 500ms / 2ms = 250 iterations
-  {
-      dshot_write(start_cmd);
-      HAL_Delay(2);
-  }
-	   *
-	  for (int i = 0; i < 250; i++)  // 500ms / 2ms = 250 iterations
-	  {
-	      dshot_write(idle_cmd);
-	      HAL_Delay(2);
-	  }
-	  dshot_write(beep_cmd);
-	 HAL_Delay(2);
-	  for (int i = 0; i < 250; i++)  // 500ms / 2ms = 250 iterations
-	  {
-	      dshot_write(run_cmd);
-	      HAL_Delay(2);
-	  }
-*/
+	    CDC_Transmit_FS((uint8_t*)msg, len);
+
 
     /* USER CODE END WHILE */
 
