@@ -32,6 +32,7 @@
 
 #define MAP_AND_CLAMP(input, imin, imax, omin, omax) \
     ( ((input) < (imin) ? (imin) : ( (input) > (imax) ? (imax) : (input) )) - (imin) ) * ((omax) - (omin)) / ((imax) - (imin)) + (omin)
+#define CLAMP(input, imin, imax) ((input) < (imin) ? (imin) : ( (input) > (imax) ? (imax) : (input) ))
 
 
 /* USER CODE END Includes */
@@ -55,12 +56,14 @@
 
 /* USER CODE BEGIN PV */
 
-const uint16_t max_motor_value = 100; //+ x* max pid for actual
-const uint16_t max_pid = 100;
+const uint16_t max_motor_value = 2000; //+ x* max pid for actual
+const uint16_t max_pid = 400;
 // angles
-const float pid_area_pitch = 20.0f;
-const float pid_area_roll = 20.0f;
-const float pid_area_yaw = 50.0f;
+const float pid_area_pitch = 60.0f;
+const float pid_area_roll = 60.0f;
+const float pid_area_yaw = 60.0f;
+
+const float d_factor = -20.f/100.f; // how much does degree speed per second correspond to degree offset? 100d/s <=> 20d error
 
 uint16_t motor_value[4] = {0,0,0,0};
 const uint16_t motor_offset = 48;
@@ -73,11 +76,21 @@ const int update_freq = 500;
 const float delta_t = 1.0f/update_freq;
 //in deg
 const float max_delta_yaw = 360.0f*.5f * delta_t;
-const float max_rx_angle = 20.0f;
+const float max_rx_angle = 25.0f;
 
 float roll;
 float pitch;
 float yaw;
+
+float prev_roll = 0.f;
+float prev_pitch = 0.f;
+float delta_roll, delta_pitch;
+float averaged_delta_roll = 0.f;
+float averaged_delta_pitch = 0.f;
+const float decay_factor = 0.2f;
+//roll	 pitch:  2.37	5.62
+const float roll_angle_offset = 2.37f;
+const float pitch_angle_offset = 5.62f;
 
 int roll_cor;
 int pitch_cor;
@@ -214,6 +227,7 @@ int main(void)
 	HAL_TIM_IC_Start(&htim9, TIM_CHANNEL_2);
 
 	int wait;
+	float throttle_f;
     char msg[1000];
     int len;
 	Mpu6500_Init(&mpu6500, &hi2c1);
@@ -249,11 +263,14 @@ int main(void)
 				mpu6500.accel[0],
 				mpu6500.accel[1]);
 
+			prev_roll = roll;
+			prev_pitch = pitch;
+
 		    // Compute Euler angles (roll, pitch, yaw) in radians
 		    roll = atan2f(2.0f * (q0 * q1 + q2 * q3), 1.0f - 2.0f * (q1*q1 + q2*q2));
 		    pitch = asinf(2.0f * (q0 * q2 - q3 * q1));
 		    yaw = atan2f(2.0f * (q0 * q3 + q1 * q2), 1.0f - 2.0f * (q2*q2 + q3*q3));
-
+		    throttle_f = cos(roll)*cos(pitch);
 		    // Convert to degrees
 		    roll *= (180.0f / M_PI);
 		    pitch *= (180.0f / M_PI);
@@ -279,43 +296,55 @@ int main(void)
 		  }
 	  }
 
-	    roll += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2),input_min,input_max,-max_rx_angle,max_rx_angle);
-	    pitch += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_1),input_min,input_max,-max_rx_angle,max_rx_angle);
-	    target_yaw += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim9, TIM_CHANNEL_2),input_min,input_max,-max_delta_yaw,max_delta_yaw);
-	    yaw += target_yaw;
+	    roll += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2),input_min,input_max,-max_rx_angle,max_rx_angle) -roll_angle_offset;
+	    pitch += MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_1),input_min,input_max,-max_rx_angle,max_rx_angle)-pitch_angle_offset;
+	    yaw = MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim9, TIM_CHANNEL_2),input_min,input_max,((float)-max_pid),((float)max_pid));
+	    /*yaw += target_yaw;
 
 	    if (yaw < 0){yaw += ((int)(-yaw) + 180)/360*360;}
-	    else{yaw -= ((int)(yaw) + 180)/360*360;}
+	    else{yaw -= ((int)(yaw) + 180)/360*360;}*/
+
+
+	    delta_roll = (prev_roll-roll)/delta_t;
+	    delta_pitch = (prev_pitch-pitch)/delta_t;
+
+	    averaged_delta_roll = decay_factor*delta_roll+averaged_delta_roll*(1.f-decay_factor);
+	    averaged_delta_pitch = decay_factor*delta_pitch+averaged_delta_pitch*(1.f-decay_factor);
+
 
 	    throttle = MAP_AND_CLAMP(HAL_TIM_ReadCapturedValue(&htim4, TIM_CHANNEL_2),input_min,input_max,0,max_motor_value);
 
-	    roll_cor = (int)(MAP_AND_CLAMP(roll,-pid_area_roll,pid_area_roll,-max_pid,max_pid));
-	    pitch_cor = (int)(MAP_AND_CLAMP(pitch,-pid_area_pitch,pid_area_pitch,-max_pid,max_pid));
-	    yaw_cor = (int)(MAP_AND_CLAMP(pitch,-pid_area_yaw,pid_area_yaw,-max_pid,max_pid));
+	    roll_cor = (int)(MAP_AND_CLAMP(roll+d_factor*averaged_delta_roll,-pid_area_roll,pid_area_roll,-max_pid,max_pid));
+	    pitch_cor = (int)(MAP_AND_CLAMP(pitch+d_factor*averaged_delta_pitch,-pid_area_pitch,pid_area_pitch,-max_pid,max_pid));
+	    yaw_cor = (int)(yaw);//MAP_AND_CLAMP(pitch,-pid_area_yaw,pid_area_yaw,-max_pid,max_pid));
 
-
-		len += sprintf(msg+len,"roll: %3.2f\t pitch:%3.2f\t yaw:%3.2f\ttarget_yaw:%3.2f throttle: %d\n",roll,pitch, yaw,target_yaw,throttle);
-
+		len += sprintf(msg+len,"roll: %3.2f\t pitch:%3.2f\t yaw:%3.2f\ttarget_yaw:%3.2f throttle: %d \tdelta_roll:%3.2f \tdelta_pitch:%3.2f\n",roll,pitch, yaw,target_yaw,throttle,averaged_delta_roll,averaged_delta_pitch);
+		throttle = (int)(((float)throttle)/ throttle_f);
 
 	   /* int len = sprintf(msg, "Roll: %5d Pitch: %5d Yaw: %5d Throttle: %5d\n",
 	                      rx_roll, rx_pitch, rx_yaw, rx_throttle);
 	    CDC_Transmit_FS((uint8_t*)msg, len);*/
 
-	    motor_value[0] = throttle + roll_cor;// + yaw_cor;
-	    motor_value[1] = throttle + pitch_cor;// - yaw_cor;
-	    motor_value[2] = throttle - roll_cor;// + yaw_cor;
-	    motor_value[3] = throttle - pitch_cor;// - yaw_cor;
+	    motor_value[0] =CLAMP( throttle + roll_cor + yaw_cor,0,max_motor_value);
+	    motor_value[1] = CLAMP(throttle + pitch_cor - yaw_cor,0,max_motor_value);
+	    motor_value[2] = CLAMP(throttle - roll_cor + yaw_cor,0,max_motor_value);
+	    motor_value[3] = CLAMP(throttle - pitch_cor - yaw_cor,0,max_motor_value);
 
-	    if(motor_value[0]>50000){motor_value[0] = 0;}
-	    if(motor_value[1]>50000){motor_value[1] = 0;}
-	    if(motor_value[2]>50000){motor_value[2] = 0;}
-	    if(motor_value[3]>50000){motor_value[3] = 0;}
+	  /*  if(motor_value[0]>max_motor_value){motor_value[0] = max_motor_value;}
+		if(motor_value[1]>max_motor_value){motor_value[1] = max_motor_value;}
+		if(motor_value[2]>max_motor_value){motor_value[2] = max_motor_value;}
+		if(motor_value[3]>max_motor_value){motor_value[3] = max_motor_value;}
+
+	   	if(motor_value[0]<0){motor_value[0] = 0;}
+		if(motor_value[1]<0){motor_value[1] = 0;}
+		if(motor_value[2]<0){motor_value[2] = 0;}
+		if(motor_value[3]<0){motor_value[3] = 0;}*/
 
 	    if(rx_inactive>200 || throttle == 0){
 	    	motor_value[0] = motor_value[1] = motor_value[2] = motor_value[3] = 0;
 	    }
 
-		len += sprintf(msg+len,"motors: %d\t%d\t%d\t%d\n",motor_value[0],motor_value[1],motor_value[2],motor_value[3]);
+		len += sprintf(msg+len,"roll_cor:%d, pitch_cor:%d ,yaw_cor:%d motors: %d\t%d\t%d\t%d\n",roll_cor,pitch_cor,yaw_cor,motor_value[0],motor_value[1],motor_value[2],motor_value[3]);
 
 
 	    dshot_write(motor_value);
