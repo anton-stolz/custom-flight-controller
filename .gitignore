@@ -1,14 +1,14 @@
 #settings
-.settings/
+firmware/.settings/
 
 #metadata
-.metadata/
+firmware/.metadata/
 
 #Debug
-Debug/
-debug/
-Release/
-release
+firmware/Debug/
+firmware/debug/
+firmware/Release/
+firmware/release
 
 # Prerequisites
 *.d
