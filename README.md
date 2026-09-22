@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/e3cfa4be-3901-4735-b42a-417750daa059
 - Brushless Motors xa2212 1400kv 3-4s 
 - 6030 Propellers.
 
-- Frame build with light wood, glued into t Beams
+- Frame build with light wood, glued into T-Beams
 
 # Software
 Very Simple PID controller, the code is mostly glue code.\
@@ -29,9 +29,9 @@ add a gps (ideally with dgnss) and make the Quadcopter autonomos, maybe with a R
 # License
 This code / the whole bundle is GPL 3.0, because of the Mahony AHRS version I used.
 
-MIT Dshot implementation by mokhwasomssi https://github.com/mokhwasomssi/stm32_hal_dshot
-GNU GPL Mahony AHRS by Madgwick https://github.com/PaulStoffregen/MahonyAHRS/blob/master/src/MahonyAHRS.cpp
-Modified, but strongly inspired by https://github.com/bolderflight/invensense-imu/blob/main/src/mpu6500.cpp
+- MIT Dshot implementation by mokhwasomssi https://github.com/mokhwasomssi/stm32_hal_dshot
+- GNU GPL Mahony AHRS by Madgwick https://github.com/PaulStoffregen/MahonyAHRS/blob/master/src/MahonyAHRS.cpp
+- Modified, but strongly inspired by https://github.com/bolderflight/invensense-imu/blob/main/src/mpu6500.cpp
 
 # LLM Use
 The Translation of the mpu6500 library from arduino cpp to stm32 and c was done with the help of ai, as well as the wiring of mahony ahrs library and the formula for converting from quaternion to euler angle. 
