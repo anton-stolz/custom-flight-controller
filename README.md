@@ -34,7 +34,7 @@ GNU GPL Mahony AHRS by Madgwick https://github.com/PaulStoffregen/MahonyAHRS/blo
 Modified, but strongly inspired by https://github.com/bolderflight/invensense-imu/blob/main/src/mpu6500.cpp
 
 # LLM Use
-The Translation of the mpu6500 library from arduino cpp to stm32 and c was done using ai, as well as the wiring of mahony ahrs library and the formula for converting from quaternion to euler angle. 
+The Translation of the mpu6500 library from arduino cpp to stm32 and c was done with the help of ai, as well as the wiring of mahony ahrs library and the formula for converting from quaternion to euler angle. 
 
 
 
